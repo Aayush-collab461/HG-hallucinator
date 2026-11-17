@@ -1,0 +1,27 @@
+# KG Hallucination Checker Configuration
+
+# Alignment thresholds
+alignment:
+  fuzzy_threshold: 75  # Lowered from 85 to catch more paraphrases
+  embedding_threshold: 0.65  # Lowered from 0.75 to catch semantic variations
+
+# Scoring weights
+scoring:
+  entity_weight: 0.6  # Increased from 0.4 - entity precision is good
+  fact_weight: 0.4    # Decreased from 0.6 - fact precision needs help
+
+# Dataset configuration
+dataset:
+  default_n_samples: 200  # Default number of samples to process
+  cache_dir: "./cache"    # Cache directory for models and datasets
+
+# Model configuration
+models:
+  spacy_model: "en_core_web_sm"
+  abstractive_model: "facebook/bart-large-cnn"
+  embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+
+# Output configuration
+output:
+  results_dir: "./results"
+  figures_dir: "./results/figures"

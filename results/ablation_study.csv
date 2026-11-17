@@ -1,0 +1,4 @@
+configuration,mean_score,std_score
+entity_only,0.78,0.12
+fact_only,0.72,0.15
+combined,0.75,0.13
