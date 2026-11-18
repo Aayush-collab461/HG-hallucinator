@@ -135,11 +135,18 @@ class AbstractiveSummarizer:
             return_tensors="pt"
         ).to(self.device)
 
+        # Adjust max/min lengths dynamically for shorter inputs to avoid verbatim copying
+        num_tokens = len(text.split())
+        gen_max = min(max_length, max(25, int(num_tokens * 0.75)))
+        gen_min = min(min_length, max(8, int(num_tokens * 0.25)))
+        if gen_max <= gen_min:
+            gen_max = gen_min + 15
+
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=max_length,
-                min_new_tokens=min_length,
+                max_new_tokens=gen_max,
+                min_new_tokens=gen_min,
                 num_beams=4,
                 length_penalty=2.0,
                 early_stopping=True

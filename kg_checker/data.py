@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 CACHE_DIR = Path("./cache")
 
 
-def load_dataset(name: str, split: str = "train", n_samples: Optional[int] = None):
+def load_dataset(name: str, split: str = "train", n_samples: Optional[int] = None,
+                 seed: Optional[int] = None):
     """
     Load dataset from HuggingFace datasets.
 
@@ -26,9 +27,10 @@ def load_dataset(name: str, split: str = "train", n_samples: Optional[int] = Non
         name: Dataset name (e.g., "cnn_dailymail", "xsum")
         split: Dataset split to load (e.g., "train", "validation", "test")
         n_samples: Number of samples to load (None for all)
+        seed: Random seed for shuffling before selection (None to skip shuffling)
 
     Returns:
-        Dataset dict with 'article' and 'highlights'/'summary' fields
+        Dataset with columns appropriate to the chosen dataset
     """
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -51,6 +53,10 @@ def load_dataset(name: str, split: str = "train", n_samples: Optional[int] = Non
         split=split,
         cache_dir=str(CACHE_DIR)
     )
+
+    # Shuffle with seed for reproducibility
+    if seed is not None:
+        dataset = dataset.shuffle(seed=seed)
 
     # Select n_samples if specified
     if n_samples is not None:

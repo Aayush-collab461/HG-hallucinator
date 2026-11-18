@@ -85,7 +85,8 @@ def evaluate_single_summary(
 
     fact_alignments = align_facts(
         summary_facts, source_facts,
-        fuzzy_threshold
+        fuzzy_threshold, embedding_threshold,
+        embedding_model
     )
 
     # Score
@@ -310,7 +311,8 @@ def compute_ablation_scores(
             )
             fact_alignments = align_facts(
                 summary_facts, source_facts,
-                fuzzy_threshold
+                fuzzy_threshold, embedding_threshold,
+                embedding_model
             )
 
             # Score with different weights

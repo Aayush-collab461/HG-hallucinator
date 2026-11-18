@@ -5,6 +5,7 @@ Aligns summary entities and facts against source knowledge graph using
 fuzzy matching and semantic similarity.
 """
 
+import re
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 import logging
@@ -16,6 +17,28 @@ import numpy as np
 from .extract import Entity, Fact
 
 logger = logging.getLogger(__name__)
+
+
+def extract_numbers(text: str) -> List[str]:
+    """Extract all digit sequences from text."""
+    return re.findall(r'\d+', text)
+
+
+def numbers_conflict(s1: str, s2: str) -> bool:
+    """
+    Check if two strings contain conflicting numbers or digits.
+    
+    Returns True if both strings contain numbers and they represent
+    different numbers (e.g. '1965' vs '1961', '45th' vs '44th', '500' vs '100').
+    Returns False if neither or only one contains numbers, or if numbers overlap.
+    """
+    n1 = extract_numbers(s1)
+    n2 = extract_numbers(s2)
+    if not n1 or not n2:
+        return False
+    if len(n1) == 1 and len(n2) == 1:
+        return n1[0] != n2[0]
+    return not bool(set(n1).intersection(set(n2)))
 
 
 @dataclass
@@ -69,12 +92,16 @@ def align_entity(
         if summary_norm == src_entity.lower().strip():
             return EntityAlignment(summary_entity, src_entity, 1.0, 'exact')
 
-    # 2. Try fuzzy matching
+    # 2. Try fuzzy matching (excluding candidates with conflicting numbers)
     best_fuzzy_score = 0.0
     best_fuzzy_match = None
 
     for src_entity in source_entities:
-        score = fuzz.ratio(summary_norm, src_entity.lower().strip())
+        src_norm = src_entity.lower().strip()
+        if numbers_conflict(summary_norm, src_norm):
+            continue
+
+        score = fuzz.ratio(summary_norm, src_norm)
         if score > best_fuzzy_score:
             best_fuzzy_score = score
             best_fuzzy_match = src_entity
@@ -90,24 +117,26 @@ def align_entity(
     # 3. Try embedding similarity (if model provided)
     if embedding_model is not None:
         try:
-            summary_emb = embedding_model.encode([summary_entity])[0]
-            source_embs = embedding_model.encode(source_entities)
+            valid_src = [s for s in source_entities if not numbers_conflict(summary_norm, s.lower().strip())]
+            if valid_src:
+                summary_emb = embedding_model.encode([summary_entity])[0]
+                source_embs = embedding_model.encode(valid_src)
 
-            # Compute cosine similarities
-            similarities = np.dot(source_embs, summary_emb) / (
-                np.linalg.norm(source_embs, axis=1) * np.linalg.norm(summary_emb)
-            )
-
-            best_idx = np.argmax(similarities)
-            best_sim = similarities[best_idx]
-
-            if best_sim >= embedding_threshold:
-                return EntityAlignment(
-                    summary_entity,
-                    source_entities[best_idx],
-                    float(best_sim),
-                    'embedding'
+                # Compute cosine similarities
+                similarities = np.dot(source_embs, summary_emb) / (
+                    np.linalg.norm(source_embs, axis=1) * np.linalg.norm(summary_emb)
                 )
+
+                best_idx = np.argmax(similarities)
+                best_sim = float(similarities[best_idx])
+
+                if best_sim >= embedding_threshold:
+                    return EntityAlignment(
+                        summary_entity,
+                        valid_src[best_idx],
+                        best_sim,
+                        'embedding'
+                    )
         except Exception as e:
             logger.warning(f"Embedding alignment failed: {e}")
 
@@ -191,18 +220,13 @@ def align_fact(
         summary_fact.object.lower().strip()
     )
 
-    best_score = 0.0
-    best_match = None
-    best_method = 'none'
-
+    # 1. Exact match
     for src_fact in source_facts:
         src_triple = (
             src_fact.subject.lower().strip(),
             src_fact.relation.lower().strip(),
             src_fact.object.lower().strip()
         )
-
-        # Check for exact match
         if summary_triple == src_triple:
             return FactAlignment(
                 (summary_fact.subject, summary_fact.relation, summary_fact.object),
@@ -211,49 +235,97 @@ def align_fact(
                 'exact'
             )
 
-        # Fuzzy matching on each component
+    # 2. Fuzzy matching on each component (preventing numeric conflicts & mismatched entities)
+    best_fuzzy_score = 0.0
+    best_fuzzy_match = None
+
+    for src_fact in source_facts:
+        src_triple = (
+            src_fact.subject.lower().strip(),
+            src_fact.relation.lower().strip(),
+            src_fact.object.lower().strip()
+        )
+
+        # Check for numeric conflicts in subject or object (e.g. 1965 vs 1961)
+        if numbers_conflict(summary_triple[0], src_triple[0]) or numbers_conflict(summary_triple[2], src_triple[2]):
+            continue
+
         subj_score = fuzz.ratio(summary_triple[0], src_triple[0])
         rel_score = fuzz.ratio(summary_triple[1], src_triple[1])
         obj_score = fuzz.ratio(summary_triple[2], src_triple[2])
 
-        # Average score across components
-        avg_score = (subj_score + rel_score + obj_score) / 3.0
+        # Both subject and object must have meaningful overlap, not just one high score masking a false entity
+        if subj_score >= 60 and obj_score >= 60 and rel_score >= 45:
+            avg_score = (subj_score + rel_score + obj_score) / 3.0
+            if avg_score >= fuzzy_threshold and avg_score > best_fuzzy_score:
+                best_fuzzy_score = avg_score
+                best_fuzzy_match = (src_fact.subject, src_fact.relation, src_fact.object)
 
-        if avg_score > best_score:
-            best_score = avg_score
-            best_match = (src_fact.subject, src_fact.relation, src_fact.object)
-            best_method = 'fuzzy' if avg_score >= fuzzy_threshold else 'none'
-
-    if best_score >= fuzzy_threshold:
+    if best_fuzzy_match is not None:
         return FactAlignment(
             (summary_fact.subject, summary_fact.relation, summary_fact.object),
-            best_match,
-            best_score / 100.0,  # Normalize to 0-1
-            best_method
+            best_fuzzy_match,
+            best_fuzzy_score / 100.0,  # Normalize to 0-1
+            'fuzzy'
         )
 
-    # Try embedding similarity if model provided
+    # 3. Embedding similarity (checking component compatibility to prevent spurious full-triple matches)
     if embedding_model is not None:
         try:
-            sum_str = f"{summary_fact.subject} {summary_fact.relation} {summary_fact.object}"
-            src_strs = [f"{f.subject} {f.relation} {f.object}" for f in source_facts]
+            best_emb_score = 0.0
+            best_emb_match = None
 
-            sum_emb = embedding_model.encode([sum_str])[0]
-            src_embs = embedding_model.encode(src_strs)
+            for src_fact in source_facts:
+                src_triple = (
+                    src_fact.subject.lower().strip(),
+                    src_fact.relation.lower().strip(),
+                    src_fact.object.lower().strip()
+                )
 
-            similarities = np.dot(src_embs, sum_emb) / (
-                np.linalg.norm(src_embs, axis=1) * np.linalg.norm(sum_emb)
-            )
+                # Skip numeric conflicts
+                if numbers_conflict(summary_triple[0], src_triple[0]) or numbers_conflict(summary_triple[2], src_triple[2]):
+                    continue
 
-            best_idx = np.argmax(similarities)
-            best_sim = similarities[best_idx]
+                subj_fuzz = fuzz.ratio(summary_triple[0], src_triple[0])
+                obj_fuzz = fuzz.ratio(summary_triple[2], src_triple[2])
+                rel_fuzz = fuzz.ratio(summary_triple[1], src_triple[1])
 
-            if best_sim >= embedding_threshold:
-                src_fact = source_facts[best_idx]
+                # Check subject compatibility
+                if subj_fuzz < 60:
+                    s_embs = embedding_model.encode([summary_triple[0], src_triple[0]])
+                    s_sim = float(np.dot(s_embs[0], s_embs[1]) / (np.linalg.norm(s_embs[0]) * np.linalg.norm(s_embs[1])))
+                    if s_sim < 0.70:
+                        continue
+
+                # Check object compatibility
+                if obj_fuzz < 60:
+                    o_embs = embedding_model.encode([summary_triple[2], src_triple[2]])
+                    o_sim = float(np.dot(o_embs[0], o_embs[1]) / (np.linalg.norm(o_embs[0]) * np.linalg.norm(o_embs[1])))
+                    if o_sim < 0.70:
+                        continue
+
+                # Check relation compatibility
+                if rel_fuzz < 45:
+                    r_embs = embedding_model.encode([summary_triple[1], src_triple[1]])
+                    r_sim = float(np.dot(r_embs[0], r_embs[1]) / (np.linalg.norm(r_embs[0]) * np.linalg.norm(r_embs[1])))
+                    if r_sim < 0.50:
+                        continue
+
+                # Compute overall triple similarity
+                sum_str = f"{summary_fact.subject} {summary_fact.relation} {summary_fact.object}"
+                src_str = f"{src_fact.subject} {src_fact.relation} {src_fact.object}"
+                embs = embedding_model.encode([sum_str, src_str])
+                sim = float(np.dot(embs[0], embs[1]) / (np.linalg.norm(embs[0]) * np.linalg.norm(embs[1])))
+
+                if sim >= embedding_threshold and sim > best_emb_score:
+                    best_emb_score = sim
+                    best_emb_match = (src_fact.subject, src_fact.relation, src_fact.object)
+
+            if best_emb_match is not None:
                 return FactAlignment(
                     (summary_fact.subject, summary_fact.relation, summary_fact.object),
-                    (src_fact.subject, src_fact.relation, src_fact.object),
-                    float(best_sim),
+                    best_emb_match,
+                    best_emb_score,
                     'embedding'
                 )
         except Exception as e:

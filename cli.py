@@ -11,7 +11,7 @@ from pathlib import Path
 import spacy
 from sentence_transformers import SentenceTransformer
 
-from kg_checker.data import load_dataset, preprocess_text
+from kg_checker.data import load_dataset, preprocess_text, get_column_names
 from kg_checker.summarizers import AbstractiveSummarizer, ExtractiveSummarizer
 from kg_checker.evaluate import (
     compare_abstractive_extractive,
@@ -116,12 +116,15 @@ def main():
     logger.info("Loading embedding model...")
     embedding_model = SentenceTransformer(config['models']['embedding_model'])
 
+    # Get correct column names for the chosen dataset
+    source_col, summary_col = get_column_names(args.dataset)
+
     # Load dataset
     logger.info(f"Loading {args.dataset} dataset...")
     dataset = load_dataset(args.dataset, split='test', n_samples=args.n, seed=args.seed)
 
-    sources = [preprocess_text(item['document']) for item in dataset]
-    references = [preprocess_text(item['summary']) for item in dataset]
+    sources = [preprocess_text(item[source_col]) for item in dataset]
+    references = [preprocess_text(item[summary_col]) for item in dataset]
 
     logger.info(f"Loaded {len(sources)} examples")
 
@@ -129,21 +132,21 @@ def main():
     logger.info("Initializing abstractive summarizer...")
     abs_summarizer = AbstractiveSummarizer(
         model_name=config['models']['abstractive_model'],
-        cache_dir=config['dataset']['cache_dir']
+        cache=True
     )
 
-    # Generate abstractive summaries
+    # Generate abstractive summaries — extract .summary string from SummaryResult
     logger.info("Generating abstractive summaries...")
     abs_summaries = []
     for i, source in enumerate(sources):
         if i % 10 == 0:
             logger.info(f"  Progress: {i}/{len(sources)}")
-        summary = abs_summarizer.summarize(source)
-        abs_summaries.append(summary)
+        result = abs_summarizer.summarize(source)
+        abs_summaries.append(result.summary)
 
     logger.info(f"Generated {len(abs_summaries)} abstractive summaries")
 
-    # Generate extractive summaries
+    # Generate extractive summaries — extract .summary string from SummaryResult
     ext_summaries = []
     if not args.skip_extractive:
         logger.info("Initializing extractive summarizer...")
@@ -153,8 +156,8 @@ def main():
         for i, source in enumerate(sources):
             if i % 10 == 0:
                 logger.info(f"  Progress: {i}/{len(sources)}")
-            summary = ext_summarizer.summarize(source)
-            ext_summaries.append(summary)
+            result = ext_summarizer.summarize(source)
+            ext_summaries.append(result.summary)
 
         logger.info(f"Generated {len(ext_summaries)} extractive summaries")
 
